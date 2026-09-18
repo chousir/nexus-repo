@@ -1,0 +1,161 @@
+# Docker registry: Bearer Token realm + docker-hosted repo + anonymous pull/push,
+# plus the nginx vhost (registry.lab + any hijacked upstream names, e.g.
+# docker.elastic.co) so `docker pull/push` works against those names unchanged.
+
+- name: Resolve admin credentials (when run without the nexus tag)
+  ansible.builtin.set_fact:
+    nexus_api_pass: "{{ nexus_admin_password }}"
+  when: nexus_api_pass is not defined
+
+- name: Get active security realms
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/realms/active"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: nexus_realms
+
+- name: Enable the Docker Bearer Token realm
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/realms/active"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body: "{{ nexus_realms.json + ['DockerToken'] }}"
+    status_code: 204
+  when: "'DockerToken' not in nexus_realms.json"
+
+- name: Check whether docker-hosted exists
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/docker-hosted"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: docker_repo
+
+- name: Create docker-hosted (connector on port {{ nexus_registry_port }})
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/docker/hosted"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: docker-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: true
+        writePolicy: ALLOW
+      docker:
+        v1Enabled: false
+        forceBasicAuth: false
+        httpPort: "{{ nexus_registry_port | int }}"
+    status_code: 201
+  when: docker_repo.status == 404
+
+- name: Check the anonymous docker write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/{{ nexus_anon_docker_privilege }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: docker_priv
+
+- name: Create the anonymous docker write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/repository-view"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ nexus_anon_docker_privilege }}"
+      description: Anonymous read/write on docker-hosted
+      actions: [BROWSE, READ, EDIT, ADD, DELETE]
+      format: docker
+      repository: docker-hosted
+    status_code: 201
+  when: docker_priv.status == 404
+
+- name: Get the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: anon_role
+
+- name: Grant the docker privilege to the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ nexus_anon_role }}"
+      name: "{{ anon_role.json.name }}"
+      description: "{{ anon_role.json.description | default('') }}"
+      privileges: "{{ (anon_role.json.privileges + [nexus_anon_docker_privilege]) | unique }}"
+      roles: "{{ anon_role.json.roles | default([]) }}"
+    status_code: 204
+  when: nexus_anon_docker_privilege not in anon_role.json.privileges
+
+- name: Render docker registry nginx vhost (registry.lab + hijacked names)
+  ansible.builtin.template:
+    src: "{{ role_path }}/docker-registry/templates/docker-nginx.conf.j2"
+    dest: "{{ nexus_project_dir }}/conf.d/docker-registry.conf"
+  notify: Reload nginx
+
+- name: Apply any pending nginx reload before verifying
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the Docker v2 API is live on the connector
+  ansible.builtin.uri:
+    url: "http://{{ nexus_bind_addr }}:{{ nexus_registry_port }}/v2/"
+    status_code: [200, 401]
+  register: docker_v2
+  until: docker_v2.status in [200, 401]
+  retries: 10
+  delay: 6
+
+- name: Verify the Docker v2 API through nginx TLS
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ nginx_https_port }}/v2/"
+    headers:
+      Host: "{{ nexus_registry_server_name }}"
+    validate_certs: false
+    status_code: [200, 401]
+
+- name: Verify hijacked registry names route through nginx (SNI + cert SAN + Host)
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --resolve
+      - "{{ item }}:{{ nginx_https_port }}:127.0.0.1"
+      - --cacert
+      - "{{ nexus_tls_dir }}/nexus.crt"
+      - "https://{{ item }}:{{ nginx_https_port }}/v2/"
+  loop: "{{ nexus_registry_extra_server_names }}"
+  register: nexus_hijack_check
+  changed_when: false
+  failed_when: nexus_hijack_check.stdout not in ['200', '401']
+
+- name: Show docker-hosted result
+  ansible.builtin.debug:
+    msg: >-
+      docker-hosted ready: {{ ([nexus_registry_server_name] + nexus_registry_extra_server_names) | join(', ') }}
+      -> connector :{{ nexus_registry_port }} (anonymous pull/push)

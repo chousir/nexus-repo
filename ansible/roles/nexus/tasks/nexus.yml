@@ -1,0 +1,272 @@
+# Deploy Nexus (container, baseline) and its nginx TLS reverse proxy.
+# Images are already loaded into the local Docker image store before this
+# runs (see README) — nothing here pulls or loads images.
+
+- name: Ensure the compose project directory
+  ansible.builtin.file:
+    path: "{{ nexus_project_dir }}"
+    state: directory
+
+- name: Render docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ nexus_project_dir }}/docker-compose.yml"
+
+- name: Check whether nexus-data is initialized
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ nexus_data_mount }}:/nexus-data"
+      - --entrypoint
+      - sh
+      - "{{ nexus_image }}"
+      - -c
+      - test -f /nexus-data/etc/nexus.properties
+  register: nexus_data_check
+  failed_when: false
+  changed_when: false
+
+- name: Initialize nexus-data (nexus.properties + ownership; bind or volume)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -u
+      - "0"
+      - -v
+      - "{{ nexus_data_mount }}:/nexus-data"
+      - --entrypoint
+      - sh
+      - "{{ nexus_image }}"
+      - -c
+      - "mkdir -p /nexus-data/etc && echo nexus.skipDefaultRepositories=true > /nexus-data/etc/nexus.properties && chown -R 200:200 /nexus-data"
+  when: nexus_data_check.rc != 0
+
+- name: Start Nexus container
+  ansible.builtin.command: docker compose up -d nexus
+  args:
+    chdir: "{{ nexus_project_dir }}"
+  register: nexus_up
+  changed_when: >
+    'Started' in nexus_up.stderr or 'Created' in nexus_up.stderr or 'Recreated' in nexus_up.stderr
+
+- name: Wait for Nexus REST API
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/status"
+    status_code: 200
+  register: nexus_status
+  until: nexus_status.status == 200
+  retries: 40
+  delay: 15
+
+- name: Read initial admin password (present only until it is changed)
+  ansible.builtin.command: docker compose exec -T nexus cat /nexus-data/admin.password
+  args:
+    chdir: "{{ nexus_project_dir }}"
+  register: nexus_admin_pw
+  failed_when: false
+  changed_when: false
+
+- name: Select admin API credentials
+  ansible.builtin.set_fact:
+    nexus_first_boot: "{{ nexus_admin_pw.rc == 0 }}"
+    nexus_api_pass: "{{ nexus_admin_pw.stdout | trim if nexus_admin_pw.rc == 0 else nexus_admin_password }}"
+
+- name: Change the admin password (first boot only)
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/users/admin/change-password"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: text/plain
+    body: "{{ nexus_admin_password }}"
+    status_code: 204
+  when: nexus_first_boot | bool
+
+- name: Use the configured admin password from now on
+  ansible.builtin.set_fact:
+    nexus_api_pass: "{{ nexus_admin_password }}"
+  when: nexus_first_boot | bool
+
+- name: Get EULA state
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/system/eula"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: nexus_eula
+
+- name: Accept the EULA
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/system/eula"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body: "{{ nexus_eula.json | combine({'accepted': true}) }}"
+    status_code: 204
+  when:
+    - nexus_eula.status == 200
+    - not (nexus_eula.json.accepted | default(true))
+
+- name: Get anonymous-access state
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/anonymous"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: nexus_anon_access
+
+- name: Enable anonymous access
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/anonymous"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      enabled: true
+      userId: anonymous
+      realmName: NexusAuthorizingRealm
+    status_code: 200
+  when: not nexus_anon_access.json.enabled
+
+- name: Get the shared anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: nexus_anon_role_get
+
+- name: Create the shared anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ nexus_anon_role }}"
+      name: "{{ nexus_anon_role }}"
+      description: Anonymous write access to hosted repositories
+      privileges: []
+      roles: []
+    status_code: 200
+  when: nexus_anon_role_get.status == 404
+
+- name: Get the anonymous user
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/users?userId=anonymous"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: nexus_anon_user
+
+- name: Attach the anonymous role to the anonymous user
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/users/anonymous"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      userId: anonymous
+      firstName: "{{ _u.firstName | default('Anonymous') }}"
+      lastName: "{{ _u.lastName | default('User') }}"
+      emailAddress: "{{ _u.emailAddress | default('anonymous@example.org', true) }}"
+      source: "{{ _u.source | default('default') }}"
+      status: "{{ _u.status | default('active') }}"
+      roles: "{{ (_u.roles + [nexus_anon_role]) | unique }}"
+    status_code: 204
+  vars:
+    _u: "{{ nexus_anon_user.json | selectattr('userId', 'equalto', 'anonymous') | first }}"
+  when: nexus_anon_role not in _u.roles
+
+- name: Report admin credentials
+  ansible.builtin.debug:
+    msg: >-
+      Nexus admin password is {{ 'now set to' if nexus_first_boot | bool else 'the value of' }}
+      the 'nexus_admin_password' variable.
+
+# --- nginx: self-signed TLS, base config, reverse proxy ---
+
+- name: Ensure cert directory
+  ansible.builtin.file:
+    path: "{{ nexus_tls_dir }}"
+    state: directory
+
+- name: Ensure nginx conf.d directory (per-registry vhosts)
+  ansible.builtin.file:
+    path: "{{ nexus_project_dir }}/conf.d"
+    state: directory
+
+- name: Record desired certificate SANs
+  ansible.builtin.set_fact:
+    nexus_cert_sans_desired: "{{ nexus_cert_sans | sort | join(',') }}"
+
+- name: Read SANs recorded for the current certificate
+  ansible.builtin.slurp:
+    src: "{{ nexus_tls_dir }}/nexus.crt.sans"
+  register: nexus_cert_sans_recorded
+  failed_when: false
+
+- name: Generate self-signed certificate (CN + SAN for every server name)
+  ansible.builtin.command: >
+    openssl req -x509 -nodes -newkey rsa:2048 -days {{ nexus_tls_days }}
+    -keyout {{ nexus_tls_dir }}/nexus.key -out {{ nexus_tls_dir }}/nexus.crt
+    -subj "/CN={{ nexus_server_name }}"
+    -addext "subjectAltName={{ nexus_cert_sans | map('regex_replace', '^', 'DNS:') | join(',') }}"
+  when: >
+    nexus_cert_sans_recorded.content is not defined or
+    (nexus_cert_sans_recorded.content | b64decode) != nexus_cert_sans_desired
+  notify: Reload nginx
+
+- name: Record the certificate's SANs (so a later name addition regenerates it)
+  ansible.builtin.copy:
+    content: "{{ nexus_cert_sans_desired }}"
+    dest: "{{ nexus_tls_dir }}/nexus.crt.sans"
+  when: >
+    nexus_cert_sans_recorded.content is not defined or
+    (nexus_cert_sans_recorded.content | b64decode) != nexus_cert_sans_desired
+
+- name: Render nginx.conf
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ nexus_project_dir }}/nginx.conf"
+  notify: Reload nginx
+
+- name: Start / update nginx container
+  ansible.builtin.command: docker compose up -d nginx
+  args:
+    chdir: "{{ nexus_project_dir }}"
+  register: nginx_up
+  changed_when: >
+    'Started' in nginx_up.stderr or 'Created' in nginx_up.stderr or 'Recreated' in nginx_up.stderr
+
+- name: Apply any pending nginx reload before verifying
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify HTTPS reverse proxy to Nexus
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ nginx_https_port }}/"
+    headers:
+      Host: "{{ nexus_server_name }}"
+    validate_certs: false
+    status_code: 200
+  register: nexus_proxy_check
+  until: nexus_proxy_check.status == 200
+  retries: 10
+  delay: 6

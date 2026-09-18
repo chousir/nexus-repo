@@ -1,0 +1,5 @@
+- name: Deploy Nexus (Docker) behind nginx
+  hosts: nexus
+  gather_facts: false
+  roles:
+    - nexus

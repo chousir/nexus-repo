@@ -1,0 +1,17 @@
+nexus_compose_project: "nexus"
+nexus_tls_dir: "{{ nexus_project_dir }}/certs"
+nexus_data_mount: "{{ nexus_data_bind_path if nexus_data_volume_type == 'bind' else nexus_data_volume_name }}"
+
+# Server-side REST endpoint (localhost, no proxy / no TLS trust needed)
+nexus_api: "http://{{ nexus_bind_addr }}:{{ nexus_http_port }}"
+
+# Server names
+nexus_all_server_names: "{{ [nexus_server_name] + nexus_extra_server_names }}"
+nexus_registry_server_names: "{{ [nexus_registry_server_name] + nexus_registry_extra_server_names }}"
+nexus_cert_sans: "{{ nexus_all_server_names + nexus_registry_server_names + nexus_maven_extra_server_names }}"
+
+# Names for the anonymous read/write security objects
+nexus_anon_role: "nx-anon-rw"
+nexus_anon_maven_privilege: "nx-anon-maven-rw"
+nexus_anon_docker_privilege: "nx-anon-docker-rw"
+nexus_anon_helm_privilege: "nx-anon-helm-rw"

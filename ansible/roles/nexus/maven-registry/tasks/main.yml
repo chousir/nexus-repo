@@ -1,0 +1,136 @@
+# Maven: maven-hosted repo + anonymous read/write, plus the Maven Central
+# domain-hijack vhost (/maven2/ rewritten to /repository/maven-hosted/).
+# The shared anonymous role and its user attachment live in nexus.yml.
+
+- name: Resolve admin credentials (when run without the nexus tag)
+  ansible.builtin.set_fact:
+    nexus_api_pass: "{{ nexus_admin_password }}"
+  when: nexus_api_pass is not defined
+
+- name: Check whether maven-hosted exists
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/maven-hosted"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: maven_repo
+
+- name: Create maven-hosted (MIXED version policy)
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/maven/hosted"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: maven-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: false
+        writePolicy: ALLOW
+      maven:
+        versionPolicy: MIXED
+        layoutPolicy: STRICT
+        contentDisposition: INLINE
+    status_code: 201
+  when: maven_repo.status == 404
+
+- name: Check the anonymous maven write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/{{ nexus_anon_maven_privilege }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: maven_priv
+
+- name: Create the anonymous maven write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/repository-view"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ nexus_anon_maven_privilege }}"
+      description: Anonymous read/write on maven-hosted
+      actions: [BROWSE, READ, EDIT, ADD, DELETE]
+      format: maven2
+      repository: maven-hosted
+    status_code: 201
+  when: maven_priv.status == 404
+
+- name: Get the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: anon_role
+
+- name: Grant the maven privilege to the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ nexus_anon_role }}"
+      name: "{{ anon_role.json.name }}"
+      description: "{{ anon_role.json.description | default('') }}"
+      privileges: "{{ (anon_role.json.privileges + [nexus_anon_maven_privilege]) | unique }}"
+      roles: "{{ anon_role.json.roles | default([]) }}"
+    status_code: 204
+  when: nexus_anon_maven_privilege not in anon_role.json.privileges
+
+- name: Verify anonymous access to maven-hosted (not 401)
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/repository/maven-hosted/"
+    status_code: [200, 404]
+
+- name: Show maven-hosted result
+  ansible.builtin.debug:
+    msg: "maven-hosted ready: https://{{ nexus_server_name }}/repository/maven-hosted/ (anonymous read/write)"
+
+# --- Maven Central domain-hijack vhost (no further Nexus API calls needed) ---
+
+- name: Render Maven Central hijack nginx vhost
+  ansible.builtin.template:
+    src: "{{ role_path }}/maven-registry/templates/maven-nginx.conf.j2"
+    dest: "{{ nexus_project_dir }}/conf.d/maven-registry.conf"
+  notify: Reload nginx
+
+- name: Apply any pending nginx reload before verifying
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify hijacked Maven Central names route through nginx (SNI + cert SAN + rewrite)
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --resolve
+      - "{{ item }}:{{ nginx_https_port }}:127.0.0.1"
+      - --cacert
+      - "{{ nexus_tls_dir }}/nexus.crt"
+      - "https://{{ item }}:{{ nginx_https_port }}/maven2/"
+  loop: "{{ nexus_maven_extra_server_names }}"
+  register: nexus_maven_hijack_check
+  changed_when: false
+  failed_when: nexus_maven_hijack_check.stdout not in ['200', '404']
+
+- name: Show Maven Central hijack result
+  ansible.builtin.debug:
+    msg: >-
+      Maven Central hijack ready: {{ nexus_maven_extra_server_names | join(', ') }}
+      -> /maven2/ rewritten to /repository/maven-hosted/
+  when: nexus_maven_extra_server_names | length > 0

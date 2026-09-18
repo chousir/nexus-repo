@@ -1,0 +1,6 @@
+- name: Reload nginx
+  ansible.builtin.command: docker compose exec -T nginx nginx -s reload
+  args:
+    chdir: "{{ nexus_project_dir }}"
+  # On first run the container has just started with this same config,
+  # so the reload is a harmless no-op.

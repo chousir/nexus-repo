@@ -1,0 +1,33 @@
+# Images — load these into the local Docker image store before running the
+# play (e.g. `docker load -i bundle/images/*.tar`); nothing here pulls or loads.
+nexus_image: "sonatype/nexus3:3.93.2"
+nginx_image: "nginx:1.27-alpine"
+
+# Deploy paths — under /opt in prod, run the play with --become
+nexus_project_dir: "/opt/nexus/compose"
+
+# Nexus data location
+nexus_data_volume_type: "bind"            # bind | volume
+nexus_data_bind_path: "/opt/nexus/nexus-data"
+nexus_data_volume_name: "nexus-data"
+
+# Nexus runtime
+nexus_bind_addr: "127.0.0.1"              # host publish addr for 8081/5000 (health/debug only)
+nexus_http_port: 8081
+nexus_registry_port: 5000                 # docker-hosted connector port
+nexus_jvm_opts: "-Xms2g -Xmx2g"
+
+# Nexus admin password — set on first boot. CHANGE THIS; use ansible-vault in real use.
+nexus_admin_password: "admin-please-change"
+
+# Reverse proxy
+nexus_server_name: "nexus.lab"                 # UI / API / Maven
+nexus_extra_server_names: []                   # extra names for the main UI/API vhost
+nexus_registry_server_name: "registry.lab"     # Docker registry
+nexus_registry_extra_server_names: ["docker.elastic.co"]   # example hijacked upstream names
+nexus_maven_extra_server_names: ["repo1.maven.org", "repo.maven.apache.org"]  # Maven Central hijack
+nginx_http_port: 80
+nginx_https_port: 443
+
+# TLS — self-signed, generated once
+nexus_tls_days: 3650

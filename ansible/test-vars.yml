@@ -1,0 +1,4 @@
+# Local test overrides: writable paths, named volume, no sudo.
+# Usage: ansible-playbook site.yml -e @test-vars.yml
+nexus_project_dir: "{{ playbook_dir }}/.deploy"
+nexus_data_volume_type: "volume"

@@ -1,0 +1,28 @@
+# Docker registry vhost — registry.lab plus any hijacked upstream names
+# (nexus_registry_extra_server_names). All of them share docker-hosted's
+# connector: the image path a client pulls/pushes is what Nexus stores,
+# regardless of which hostname it came in on.
+upstream registry { server nexus:{{ nexus_registry_port }}; keepalive 16; }
+
+server {
+    listen 80;
+    server_name {{ nexus_registry_server_names | join(' ') }};
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name {{ nexus_registry_server_names | join(' ') }};
+
+    ssl_certificate     /etc/nginx/certs/nexus.crt;
+    ssl_certificate_key /etc/nginx/certs/nexus.key;
+    chunked_transfer_encoding on;
+
+    location / {
+        proxy_pass http://registry;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Connection        "";
+        proxy_read_timeout 900s;
+    }
+}

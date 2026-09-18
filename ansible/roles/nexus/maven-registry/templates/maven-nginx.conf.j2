@@ -1,0 +1,29 @@
+# Maven Central domain-hijack: unmodified mvn/sbt/gradle clients using the
+# default Central URL (repo1.maven.org et al.) resolve straight to
+# maven-hosted. Unlike docker-registry, this needs path rewriting because
+# Central's /maven2/ layout differs from Nexus's /repository/<repo>/ layout.
+# Reuses the "nexus" upstream defined in the base nginx.conf.
+{% if nexus_maven_extra_server_names %}
+server {
+    listen 80;
+    server_name {{ nexus_maven_extra_server_names | join(' ') }};
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name {{ nexus_maven_extra_server_names | join(' ') }};
+
+    ssl_certificate     /etc/nginx/certs/nexus.crt;
+    ssl_certificate_key /etc/nginx/certs/nexus.key;
+
+    location /maven2/ {
+        # Trailing slash on both sides: nginx rewrites /maven2/<path> to
+        # /repository/maven-hosted/<path> before proxying.
+        proxy_pass http://nexus/repository/maven-hosted/;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Connection        "";
+    }
+}
+{% endif %}

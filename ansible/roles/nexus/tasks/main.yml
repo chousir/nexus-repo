@@ -1,0 +1,11 @@
+- import_tasks: nexus.yml
+  tags: [nexus, nginx]
+
+- import_tasks: ../docker-registry/tasks/main.yml
+  tags: [docker]
+
+- import_tasks: ../maven-registry/tasks/main.yml
+  tags: [maven]
+
+- import_tasks: helm.yml
+  tags: [helm]

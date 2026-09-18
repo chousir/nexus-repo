@@ -1,0 +1,96 @@
+# Helm: helm-hosted repo + anonymous read/write.
+# Path-based format, same as raw/cargo — shares nexus.lab (the base vhost
+# already proxies everything to :8081), no extra nginx config or cert needed.
+# The shared anonymous role and its user attachment live in nexus.yml.
+
+- name: Resolve admin credentials (when run without the nexus tag)
+  ansible.builtin.set_fact:
+    nexus_api_pass: "{{ nexus_admin_password }}"
+  when: nexus_api_pass is not defined
+
+- name: Check whether helm-hosted exists
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/helm-hosted"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: helm_repo
+
+- name: Create helm-hosted
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/helm/hosted"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: helm-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: true
+        writePolicy: ALLOW
+    status_code: 201
+  when: helm_repo.status == 404
+
+- name: Check the anonymous helm write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/{{ nexus_anon_helm_privilege }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: helm_priv
+
+- name: Create the anonymous helm write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/repository-view"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ nexus_anon_helm_privilege }}"
+      description: Anonymous read/write on helm-hosted
+      actions: [BROWSE, READ, EDIT, ADD, DELETE]
+      format: helm
+      repository: helm-hosted
+    status_code: 201
+  when: helm_priv.status == 404
+
+- name: Get the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: anon_role
+
+- name: Grant the helm privilege to the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ nexus_anon_role }}"
+      name: "{{ anon_role.json.name }}"
+      description: "{{ anon_role.json.description | default('') }}"
+      privileges: "{{ (anon_role.json.privileges + [nexus_anon_helm_privilege]) | unique }}"
+      roles: "{{ anon_role.json.roles | default([]) }}"
+    status_code: 204
+  when: nexus_anon_helm_privilege not in anon_role.json.privileges
+
+- name: Verify anonymous access to helm-hosted (not 401)
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/repository/helm-hosted/"
+    status_code: [200, 404]
+
+- name: Show helm-hosted result
+  ansible.builtin.debug:
+    msg: "helm-hosted ready: https://{{ nexus_server_name }}/repository/helm-hosted/ (anonymous read/write)"

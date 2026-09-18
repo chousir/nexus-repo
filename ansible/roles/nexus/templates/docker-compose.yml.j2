@@ -1,0 +1,32 @@
+name: {{ nexus_compose_project }}
+
+services:
+  nexus:
+    image: {{ nexus_image }}
+    restart: unless-stopped
+    environment:
+      INSTALL4J_ADD_VM_PARAMS: "{{ nexus_jvm_opts }}"
+    volumes:
+      - {{ nexus_data_mount }}:/nexus-data
+    ports:
+      - "{{ nexus_bind_addr }}:{{ nexus_http_port }}:8081"
+      - "{{ nexus_bind_addr }}:{{ nexus_registry_port }}:{{ nexus_registry_port }}"   # docker registry connector
+
+  nginx:
+    image: {{ nginx_image }}
+    restart: unless-stopped
+    depends_on:
+      - nexus
+    ports:
+      - "{{ nginx_http_port }}:80"
+      - "{{ nginx_https_port }}:443"
+    volumes:
+      - {{ nexus_project_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - {{ nexus_project_dir }}/conf.d:/etc/nginx/conf.d:ro
+      - {{ nexus_tls_dir }}:/etc/nginx/certs:ro
+{% if nexus_data_volume_type == 'volume' %}
+
+volumes:
+  {{ nexus_data_volume_name }}:
+    name: {{ nexus_data_volume_name }}
+{% endif %}
