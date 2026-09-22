@@ -20,12 +20,19 @@ nexus_jvm_opts: "-Xms2g -Xmx2g"
 # Nexus admin password — set on first boot. CHANGE THIS; use ansible-vault in real use.
 nexus_admin_password: "admin-please-change"
 
+# Password for the dedicated pypi-uploader account (twine upload only — pip
+# install/read stays anonymous like every other format). CHANGE THIS; use
+# ansible-vault in real use.
+nexus_pypi_uploader_password: "pypi-uploader-please-change"
+
 # Reverse proxy
 nexus_server_name: "nexus.lab"                 # UI / API / Maven
 nexus_extra_server_names: []                   # extra names for the main UI/API vhost
 nexus_registry_server_name: "registry.lab"     # Docker registry
 nexus_registry_extra_server_names: ["docker.elastic.co"]   # example hijacked upstream names
 nexus_maven_extra_server_names: ["repo1.maven.org", "repo.maven.apache.org"]  # Maven Central hijack
+nexus_pypi_extra_server_names: ["pypi.org"]              # PyPI install hijack (simple index + files)
+nexus_pypi_upload_extra_server_names: ["upload.pypi.org"] # PyPI publish hijack (twine)
 nginx_http_port: 80
 nginx_https_port: 443
 

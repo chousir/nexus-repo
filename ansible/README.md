@@ -28,11 +28,15 @@ roles/nexus/
     tasks/main.yml            #   maven-hosted + anon read/write, then the Maven
                               #   Central domain-hijack vhost + verify
     templates/maven-nginx.conf.j2    # /maven2/ rewritten to /repository/maven-hosted/
+  pypi-registry/              # self-contained: pypi-hosted + its own nginx vhosts
+    tasks/main.yml            #   pypi-hosted + anon READ + pypi-uploader account (write),
+                              #   then the PyPI domain-hijack vhosts + verify
+    templates/pypi-nginx.conf.j2     # pypi.org (/simple/,/packages/) + upload.pypi.org (/legacy/)
 ```
 
 A `<name>-registry/{tasks,templates}/` folder next to `roles/nexus/` exists
 **only when a format needs its own nginx vhost** (docker: extra names on the
-same vhost; maven: a `/maven2/` path rewrite) — each one is fully
+same vhost; maven and pypi: a path rewrite) — each one is fully
 self-contained: repo/privilege creation and the vhost that serves it live in
 the same `tasks/main.yml`. Formats that are purely path-based under
 `nexus.lab` (helm, and eventually raw/cargo) are a flat `tasks/<format>.yml`
@@ -80,6 +84,11 @@ at the host, and trust the generated CA `<nexus_project_dir>/certs/nexus.crt`
   `/etc/docker/certs.d/<name>/ca.crt` = the generated `nexus.crt`.
 - **helm-hosted** — `https://<nexus_server_name>/repository/helm-hosted/`,
   **anonymous read/write** (`helm push`/`helm repo add` need no credentials).
+- **pypi-hosted** — `https://<nexus_server_name>/repository/pypi-hosted/`,
+  **anonymous read** (`pip install` needs no credentials) but **publish needs
+  the `pypi-uploader` account** (`nexus_pypi_uploader_password`, default
+  `pypi-uploader-please-change` — override it) — the only format here where
+  install and publish use different access levels.
 
 ### Domain-hijacked pulls (docker-registry)
 
@@ -123,6 +132,57 @@ Test without touching system DNS or trust stores:
 curl --resolve repo1.maven.org:443:<nginx-host-ip> \
      --cacert <nexus_project_dir>/certs/nexus.crt \
      https://repo1.maven.org/maven2/com/example/probe/1.0/probe-1.0.txt
+```
+
+### Domain-hijacked PyPI (pypi-registry)
+
+`nexus_pypi_extra_server_names` (default: `[pypi.org]`) adds a vhost that
+rewrites `/simple/` and `/packages/` to `/repository/pypi-hosted/simple/` and
+`.../packages/` — Nexus's own pypi-hosted simple index emits **relative**
+`href`s (`../../packages/<pkg>/<version>/<file>#sha256=...`, confirmed live),
+so both paths need rewriting, not just one. `nexus_pypi_upload_extra_server_names`
+(default: `[upload.pypi.org]`) adds a second vhost rewriting `/legacy/` —
+twine's default upload URL — to the `pypi-hosted` repository root. Together,
+unmodified `pip install`/`twine upload` need **zero** `--index-url` /
+`--repository-url` flags.
+
+⚠️ Same trade-off already noted for the Maven Central hijack: once `pypi.org`
+is hijacked, this host can no longer reach the *real* PyPI — confirmed live
+(a container with the hijack applied could not `pip install twine` from the
+real internet). Anything not published into `pypi-hosted` will 404. If you
+also use Appendix B's `pip download ansible-core` bootstrap, run that step on
+a host that does **not** have this hijack applied.
+
+`pip`/`twine` verify TLS against the bundled `certifi` CA list, **not** the
+OS trust store (unlike `curl --cacert`, Docker's `certs.d/`, or the JVM
+truststore) — point them at `nexus.crt` explicitly:
+
+```
+export PIP_CERT=<nexus_project_dir>/certs/nexus.crt
+export TWINE_CERT=<nexus_project_dir>/certs/nexus.crt
+```
+
+Test without touching system DNS or trust stores:
+
+```
+curl --resolve pypi.org:443:<nginx-host-ip> \
+     --cacert <nexus_project_dir>/certs/nexus.crt \
+     https://pypi.org/simple/
+```
+
+Real `pip`/`twine` clients (needs `/etc/hosts` — needs `sudo`; verified here
+via a container on the compose network instead, see
+`../nexus-airgap-verification.md`):
+
+```
+echo "<nginx-host-ip> pypi.org upload.pypi.org" | sudo tee -a /etc/hosts
+
+# publish — gated by the pypi-uploader account, not anonymous
+TWINE_USERNAME=pypi-uploader TWINE_PASSWORD=<nexus_pypi_uploader_password> \
+  twine upload dist/*
+
+# install — anonymous, no credentials
+pip install nexus-probe-pkg
 ```
 
 ## Teardown

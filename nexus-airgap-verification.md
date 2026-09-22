@@ -6,7 +6,7 @@ Maven / Docker / Helm 上傳下載驗證，含網域劫持（domain-hijack）測
 
 1. [目前架構](#目前架構)
 2. [佈署指令](#佈署指令)（正式環境／本機測試）
-3. [Maven](#maven--上傳--下載測試) / [Docker](#docker--上傳--下載測試) / [Helm](#helm--上傳--下載測試)
+3. [Maven](#maven--上傳--下載測試) / [Docker](#docker--上傳--下載測試) / [Helm](#helm--上傳--下載測試) / [PyPI](#pypi--上傳--下載測試)
 4. [疑難排解](#疑難排解)
 5. [附錄 A — Maven/sbt 大型專案離線相依作業流程](#附錄-a--mavensbt-大型專案離線相依作業流程)
 6. [附錄 B — 離線環境佈署 Ansible 本身](#附錄-b--離線環境佈署-ansible-本身)
@@ -20,23 +20,25 @@ Maven / Docker / Helm 上傳下載驗證，含網域劫持（domain-hijack）測
 | 項目 | 內容 |
 |---|---|
 | 版本 | `sonatype/nexus3:3.93.2`（Community Edition） |
-| Hosted 儲存庫 | `docker-hosted`、`maven-hosted`（MIXED）、`helm-hosted`，皆用內建 `default` blob store |
+| Hosted 儲存庫 | `docker-hosted`、`maven-hosted`（MIXED）、`helm-hosted`、`pypi-hosted`，皆用內建 `default` blob store |
 | 尚未實作 | `raw-hosted`、`cargo-hosted`（規劃中，同 `helm-hosted` 模式：path-based，免額外 nginx 設定） |
-| 存取 | 匿名讀寫，免帳密 |
+| 存取 | 匿名讀寫，免帳密——**除了 pypi-hosted 的上傳**：`pip install` 仍匿名，`twine upload` 需 `pypi-uploader` 帳密（見下） |
 | 反向代理 | 容器化 nginx，單一自簽憑證涵蓋全部主機名；vhost 依格式拆在 `conf.d/` |
 
 **主機名對應**（預設值，可在 `inventory/group_vars/all.yml` 覆寫）
 
 | 主機名 | 機制 | 用途 |
 |---|---|---|
-| `nexus.lab` | 一般反代 → `nexus:8081` | UI / API / Maven（直接路徑）/ Helm |
+| `nexus.lab` | 一般反代 → `nexus:8081` | UI / API / Maven／PyPI（直接路徑）/ Helm |
 | `registry.lab` | 一般反代 → `nexus:5000` | Docker registry |
 | `docker.elastic.co`（範例） | 網域劫持：同一 connector 多掛一個 `server_name` ＋憑證 SAN | Docker 劫持，`nexus_registry_extra_server_names` |
 | `repo1.maven.org`、`repo.maven.apache.org` | 網域劫持＋路徑改寫：`/maven2/` → `/repository/maven-hosted/` | Maven Central 劫持，`nexus_maven_extra_server_names` |
+| `pypi.org` | 網域劫持＋路徑改寫：`/simple/`、`/packages/` → `/repository/pypi-hosted/...` | PyPI 安裝劫持（匿名），`nexus_pypi_extra_server_names` |
+| `upload.pypi.org` | 網域劫持＋路徑改寫：`/legacy/` → `/repository/pypi-hosted/` | PyPI 上傳劫持（需 `pypi-uploader` 帳密），`nexus_pypi_upload_extra_server_names` |
 
-> docker 劫持只是多掛一個 `server_name`（Docker Registry API 路徑本來就跟 Nexus 一致，不用改路徑）；maven 劫持要做路徑改寫（Maven Central 用 `/maven2/...`，Nexus 用 `/repository/<repo>/...`，格式不同）。helm 不需要劫持——chart repo URL 本來就是自訂的，沒有像 Docker Hub／Maven Central 那樣全世界共用的網域可劫持，直接用 `nexus.lab` 即可，raw/cargo 之後同理。
+> docker 劫持只是多掛一個 `server_name`（Docker Registry API 路徑本來就跟 Nexus 一致，不用改路徑）；maven 劫持要做路徑改寫（Maven Central 用 `/maven2/...`，Nexus 用 `/repository/<repo>/...`，格式不同）。pypi 也要路徑改寫，且拆成**兩個**網域——真正的 PyPI 本來就是讀（`pypi.org`）跟寫（`upload.pypi.org`）分屬不同主機，這裡如實對應。helm 不需要劫持——chart repo URL 本來就是自訂的，沒有像 Docker Hub／Maven Central／PyPI 那樣全世界共用的網域可劫持，直接用 `nexus.lab` 即可，raw/cargo 之後同理。
 
-**憑證**：所有主機名（含兩個劫持清單）收斂進 `nexus_cert_sans`。異動 `inventory/group_vars/all.yml` 的 `nexus_registry_extra_server_names`／`nexus_maven_extra_server_names` 後重跑 `ansible-playbook site.yml` 即可——憑證會自動偵測 SAN 差異、重簽＋reload nginx，不需手動處理。
+**憑證**：所有主機名（含四個劫持清單）收斂進 `nexus_cert_sans`。異動 `inventory/group_vars/all.yml` 的 `nexus_registry_extra_server_names`／`nexus_maven_extra_server_names`／`nexus_pypi_extra_server_names`／`nexus_pypi_upload_extra_server_names` 後重跑 `ansible-playbook site.yml` 即可——憑證會自動偵測 SAN 差異、重簽＋reload nginx，不需手動處理。
 
 > ⚠️ compose 預設把 `8081`/`5000` 綁在 `nexus_bind_addr`（預設 `127.0.0.1`，僅供健康檢查）；正式環境勿改綁 `0.0.0.0`，否則外部可繞過 nginx 明文直連。匿名讀寫＝任何連得到的人都能推送/覆寫。
 
@@ -229,6 +231,56 @@ helm search repo nexus
 
 ---
 
+## PyPI — 上傳 / 下載測試
+
+`pip install`（讀）全程匿名；`twine upload`（寫）需要 `pypi-uploader` 帳密——本專案唯一「讀寫權限不同」的格式（其餘三個格式皆匿名讀寫）。
+
+### 直接路徑（`nexus.lab`）
+
+```bash
+CERT=ansible/.deploy/certs/nexus.crt
+
+# 上傳（twine，需 pypi-uploader 帳密）
+TWINE_USERNAME=pypi-uploader TWINE_PASSWORD=<nexus_pypi_uploader_password> \
+  twine upload --repository-url https://nexus.lab/repository/pypi-hosted/ \
+  --cert "$CERT" dist/*
+
+# 下載（pip，匿名，免帳密）
+pip install --index-url https://nexus.lab/repository/pypi-hosted/simple/ --cert "$CERT" <pkg>
+```
+
+✅ **2026-09-22** — wheel + sdist 上傳皆成功；直接路徑安裝、import 正常。
+
+### 網域劫持路徑（`pypi.org` / `upload.pypi.org`）
+
+```bash
+curl -sS --resolve pypi.org:443:127.0.0.1 --cacert "$CERT" https://pypi.org/simple/<pkg>/
+```
+
+✅ **2026-09-22** — 確認 `pypi-hosted` 的 simple index 回傳**相對路徑**的 href（`../../packages/<pkg>/<version>/<file>#sha256=...`），所以劫持 vhost 要同時改寫 `/simple/` 與 `/packages/` 兩個路徑——跟 Maven 只需要改寫一個 `/maven2/` 不同。
+
+### 真實用戶端（`pip install` / `twine upload`），正式環境
+
+pip/twine 用內建的 `certifi` CA 清單驗證 TLS，**不是** OS 信任庫（跟 curl `--cacert`、docker 的 `certs.d/`、JVM `keytool` 都不一樣）：
+
+```bash
+export PIP_CERT=nexus.crt
+export TWINE_CERT=nexus.crt
+echo "<NGINX_IP> pypi.org upload.pypi.org" | sudo tee -a /etc/hosts
+
+# 上傳 — 走 pypi-uploader 帳密，非匿名
+TWINE_USERNAME=pypi-uploader TWINE_PASSWORD=<nexus_pypi_uploader_password> twine upload dist/*
+
+# 安裝 — 匿名，免帳密
+pip install <pkg>
+```
+
+✅ **2026-09-22**（本沙箱無 sudo，改用一個掛進 nginx 所在 compose network、`--add-host` 直接指到 nginx 容器 IP 的 container 模擬劫持，效果等同改 `/etc/hosts`）——**完全未帶 `--index-url`/`--repository-url`** 的 `twine upload`／`pip install` 皆成功：twine 印出 `Uploading distributions to https://upload.pypi.org/legacy/`（預設值，證明真的打中劫持網域，不是意外成功）；pip 印出 `Downloading https://pypi.org/packages/...`（證明相對 href 正確解析回劫持網域）；下載回來的套件 `import` 正常。另外驗證：`twine upload` 用錯密碼被拒 `401 Unauthorized`（證明上傳確實有認證閘門）；`pip install` 全程無任何帳密。
+
+> ⚠️ **劫持後這台機器連不到真正的 PyPI**——跟 Maven Central 劫持一樣的取捨，且已實測驗證：同一個劫持過的 container 想額外 `pip install twine`（走真正的 PyPI）會逾時失敗，因為 `pypi.org` 已經解析到本地 Nexus。若還要用**附錄 B**「連網環境下載 ansible-core」，那一步務必在**沒有套用這個劫持**的機器上執行，否則 `pip download` 會改抓（通常是空的）本地 `pypi-hosted`，而非真正的 PyPI，且不會有明顯錯誤（只是找不到套件或裝到舊版）。
+
+---
+
 ## 疑難排解
 
 | 症狀 | 處理 |
@@ -242,6 +294,8 @@ helm search repo nexus
 | 容器啟動即結束、log 權限錯誤 | `nexus-data` 目錄需 UID 200 擁有；`nexus.yml` 已自動處理初始化，若手動改過該目錄需重新跑一次讓它修正權限 |
 | Maven 權限建立失敗 / 名稱格式錯 | Nexus API 的 privilege `format` 要填 `maven2`（不是 `maven`）；建 repo 的端點才是 `.../repositories/maven/hosted` |
 | sbt 報 SSL / PKIX `unable to find valid certification path` | sbt 走 JVM truststore，需用 `keytool` 把 `nexus.crt` 匯入 Java cacerts；系統的 `update-ca-certificates` 對 JVM 無效 |
+| `pip`/`twine` 報 `CERTIFICATE_VERIFY_FAILED` | pip/twine 走內建 `certifi` CA 清單，**不是** OS 信任庫；系統的 `update-ca-certificates` 對它們無效。設定 `PIP_CERT`/`TWINE_CERT` 指向 `nexus.crt`（或 `pip install --cert`/`twine upload --cert`） |
+| `twine upload` 回 `401 Unauthorized` | pypi-hosted 的上傳不是匿名——確認 `TWINE_USERNAME=pypi-uploader`／`TWINE_PASSWORD` 正確；純讀取（`pip install`）不需要這組帳密 |
 
 ---
 
@@ -647,6 +701,8 @@ PyPI／apt 上的 `ansible`（不帶 `-core`）是會順便拉進幾百個 colle
 ---
 
 ### B.1 連網環境：下載 Ansible 執行檔＋相依，順便存好映像
+
+⚠️ 這一步要在**沒有套用 PyPI 劫持**（見主文「PyPI — 上傳 / 下載測試」的 `pypi.org` 網域劫持）的機器上執行——劫持後 `pip download` 會改抓本地（通常是空的）`pypi-hosted`，而非真正的 PyPI，且不一定會報明顯錯誤。
 
 **在 `ansible/` 專案目錄的上一層**建一個純暫存的搬運目錄（不進版控、不進專案目錄，用完即丟）：
 

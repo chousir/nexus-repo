@@ -9,3 +9,6 @@
 
 - import_tasks: helm.yml
   tags: [helm]
+
+- import_tasks: ../pypi-registry/tasks/main.yml
+  tags: [pypi]

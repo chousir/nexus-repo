@@ -1,0 +1,56 @@
+# PyPI domain-hijack: unmodified pip/twine using the default PyPI URLs
+# (pypi.org for install, upload.pypi.org for publish) resolve straight to
+# pypi-hosted. Reuses the "nexus" upstream defined in the base nginx.conf.
+{% if nexus_pypi_extra_server_names %}
+server {
+    listen 80;
+    server_name {{ nexus_pypi_extra_server_names | join(' ') }};
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name {{ nexus_pypi_extra_server_names | join(' ') }};
+
+    ssl_certificate     /etc/nginx/certs/nexus.crt;
+    ssl_certificate_key /etc/nginx/certs/nexus.key;
+
+    location /simple/ {
+        proxy_pass http://nexus/repository/pypi-hosted/simple/;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Connection        "";
+    }
+    location /packages/ {
+        proxy_pass http://nexus/repository/pypi-hosted/packages/;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Connection        "";
+    }
+}
+{% endif %}
+{% if nexus_pypi_upload_extra_server_names %}
+server {
+    listen 80;
+    server_name {{ nexus_pypi_upload_extra_server_names | join(' ') }};
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name {{ nexus_pypi_upload_extra_server_names | join(' ') }};
+
+    ssl_certificate     /etc/nginx/certs/nexus.crt;
+    ssl_certificate_key /etc/nginx/certs/nexus.key;
+
+    location /legacy/ {
+        # twine's default "pypi" repository posts to /legacy/; Nexus's
+        # pypi-hosted upload endpoint is the repository root.
+        proxy_pass http://nexus/repository/pypi-hosted/;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Connection        "";
+    }
+}
+{% endif %}

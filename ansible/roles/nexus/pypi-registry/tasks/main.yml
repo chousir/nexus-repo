@@ -1,0 +1,240 @@
+# PyPI: pypi-hosted repo, anonymous READ-ONLY (pip install), plus a dedicated
+# pypi-uploader account for twine upload (the only format in this project
+# where install and publish use different access levels). Also renders the
+# PyPI domain-hijack vhosts (pypi.org for install, upload.pypi.org for
+# publish) so unmodified pip/twine work without any client-side config.
+# The shared anonymous role and its user attachment live in nexus.yml.
+
+- name: Resolve admin credentials (when run without the nexus tag)
+  ansible.builtin.set_fact:
+    nexus_api_pass: "{{ nexus_admin_password }}"
+  when: nexus_api_pass is not defined
+
+- name: Check whether pypi-hosted exists
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/pypi-hosted"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: pypi_repo
+
+- name: Create pypi-hosted
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/repositories/pypi/hosted"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: pypi-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: true
+        writePolicy: ALLOW
+    status_code: 201
+  when: pypi_repo.status == 404
+
+- name: Check the anonymous pypi read privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/{{ nexus_anon_pypi_privilege }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: pypi_anon_priv
+
+- name: Create the anonymous pypi read privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/repository-view"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ nexus_anon_pypi_privilege }}"
+      description: Anonymous read-only on pypi-hosted
+      actions: [BROWSE, READ]
+      format: pypi
+      repository: pypi-hosted
+    status_code: 201
+  when: pypi_anon_priv.status == 404
+
+- name: Get the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: anon_role
+
+- name: Grant the pypi read privilege to the anonymous role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_anon_role }}"
+    method: PUT
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ nexus_anon_role }}"
+      name: "{{ anon_role.json.name }}"
+      description: "{{ anon_role.json.description | default('') }}"
+      privileges: "{{ (anon_role.json.privileges + [nexus_anon_pypi_privilege]) | unique }}"
+      roles: "{{ anon_role.json.roles | default([]) }}"
+    status_code: 204
+  when: nexus_anon_pypi_privilege not in anon_role.json.privileges
+
+- name: Verify anonymous read access to pypi-hosted (not 401)
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/repository/pypi-hosted/simple/"
+    status_code: [200, 404]
+
+# --- pypi-uploader account (twine upload only; not anonymous) ---
+
+- name: Check the pypi-uploader write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/{{ nexus_pypi_uploader_privilege }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: pypi_uploader_priv
+
+- name: Create the pypi-uploader write privilege
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/privileges/repository-view"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ nexus_pypi_uploader_privilege }}"
+      description: Read/write on pypi-hosted for the pypi-uploader account
+      actions: [BROWSE, READ, EDIT, ADD, DELETE]
+      format: pypi
+      repository: pypi-hosted
+    status_code: 201
+  when: pypi_uploader_priv.status == 404
+
+- name: Check whether the pypi-uploader role exists
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles/{{ nexus_pypi_uploader_role }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: pypi_uploader_role
+
+- name: Create the pypi-uploader role
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/roles"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ nexus_pypi_uploader_role }}"
+      name: "{{ nexus_pypi_uploader_role }}"
+      description: Can publish to pypi-hosted via twine
+      privileges: ["{{ nexus_pypi_uploader_privilege }}"]
+      roles: []
+    status_code: 200
+  when: pypi_uploader_role.status == 404
+
+- name: Check whether the pypi-uploader user exists
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/users?userId={{ nexus_pypi_uploader_user }}"
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+  register: pypi_uploader_user_lookup
+
+- name: Create the pypi-uploader user
+  ansible.builtin.uri:
+    url: "{{ nexus_api }}/service/rest/v1/security/users"
+    method: POST
+    user: admin
+    password: "{{ nexus_api_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      userId: "{{ nexus_pypi_uploader_user }}"
+      firstName: pypi
+      lastName: uploader
+      emailAddress: "pypi-uploader@nexus.lab"
+      password: "{{ nexus_pypi_uploader_password }}"
+      status: active
+      roles: ["{{ nexus_pypi_uploader_role }}"]
+    status_code: 200
+  when: pypi_uploader_user_lookup.json | length == 0
+
+- name: Show pypi-hosted result
+  ansible.builtin.debug:
+    msg: >-
+      pypi-hosted ready: https://{{ nexus_server_name }}/repository/pypi-hosted/
+      (anonymous read; publish via twine as {{ nexus_pypi_uploader_user }})
+
+# --- PyPI domain-hijack vhosts (no further Nexus API calls needed) ---
+
+- name: Render PyPI domain-hijack nginx vhosts
+  ansible.builtin.template:
+    src: "{{ role_path }}/pypi-registry/templates/pypi-nginx.conf.j2"
+    dest: "{{ nexus_project_dir }}/conf.d/pypi-registry.conf"
+  notify: Reload nginx
+
+- name: Apply any pending nginx reload before verifying
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify hijacked PyPI install names route through nginx (SNI + cert SAN + rewrite)
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --resolve
+      - "{{ item }}:{{ nginx_https_port }}:127.0.0.1"
+      - --cacert
+      - "{{ nexus_tls_dir }}/nexus.crt"
+      - "https://{{ item }}:{{ nginx_https_port }}/simple/"
+  loop: "{{ nexus_pypi_extra_server_names }}"
+  register: nexus_pypi_hijack_check
+  changed_when: false
+  failed_when: nexus_pypi_hijack_check.stdout not in ['200', '404']
+
+- name: Verify hijacked PyPI upload names route through nginx (SNI + cert SAN)
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --resolve
+      - "{{ item }}:{{ nginx_https_port }}:127.0.0.1"
+      - --cacert
+      - "{{ nexus_tls_dir }}/nexus.crt"
+      - "https://{{ item }}:{{ nginx_https_port }}/legacy/"
+  loop: "{{ nexus_pypi_upload_extra_server_names }}"
+  register: nexus_pypi_upload_hijack_check
+  changed_when: false
+  # A bare GET on the upload endpoint isn't a real upload; Nexus/nginx just
+  # needs to route it somewhere sane (2xx/3xx/4xx), not 5xx. A real
+  # twine upload round-trip is the actual functional test.
+  failed_when: (nexus_pypi_upload_hijack_check.stdout | int) >= 500
+
+- name: Show PyPI hijack result
+  ansible.builtin.debug:
+    msg: >-
+      PyPI hijack ready: install via {{ nexus_pypi_extra_server_names | join(', ') }},
+      publish via {{ nexus_pypi_upload_extra_server_names | join(', ') }}
+  when: (nexus_pypi_extra_server_names | length > 0) or (nexus_pypi_upload_extra_server_names | length > 0)

@@ -8,10 +8,17 @@ nexus_api: "http://{{ nexus_bind_addr }}:{{ nexus_http_port }}"
 # Server names
 nexus_all_server_names: "{{ [nexus_server_name] + nexus_extra_server_names }}"
 nexus_registry_server_names: "{{ [nexus_registry_server_name] + nexus_registry_extra_server_names }}"
-nexus_cert_sans: "{{ nexus_all_server_names + nexus_registry_server_names + nexus_maven_extra_server_names }}"
+nexus_cert_sans: "{{ nexus_all_server_names + nexus_registry_server_names + nexus_maven_extra_server_names + nexus_pypi_extra_server_names + nexus_pypi_upload_extra_server_names }}"
 
 # Names for the anonymous read/write security objects
 nexus_anon_role: "nx-anon-rw"
 nexus_anon_maven_privilege: "nx-anon-maven-rw"
 nexus_anon_docker_privilege: "nx-anon-docker-rw"
 nexus_anon_helm_privilege: "nx-anon-helm-rw"
+nexus_anon_pypi_privilege: "nx-anon-pypi-r"      # read-only — install stays anonymous
+
+# pypi-hosted is the only format with a separate, non-anonymous write path:
+# a dedicated Nexus account for twine upload, scoped to pypi-hosted only.
+nexus_pypi_uploader_role: "pypi-uploader"
+nexus_pypi_uploader_privilege: "pypi-uploader-rw"
+nexus_pypi_uploader_user: "pypi-uploader"
