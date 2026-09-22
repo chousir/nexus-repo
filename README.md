@@ -2,10 +2,11 @@
 
 Air-gapped **Nexus Repository 3** (Docker) behind a containerized **nginx**
 TLS reverse proxy, deployed with Ansible — no Galaxy collections, no registry
-access required at deploy time. Ships Docker/Maven/Helm hosted repos with
-anonymous read/write, plus domain-hijack vhosts so unmodified `docker`/`mvn`/
-`sbt` clients resolve straight to the local mirror instead of the public
-registry.
+access required at deploy time. Ships Docker/Maven/Helm/PyPI hosted repos,
+plus domain-hijack vhosts so unmodified `docker`/`mvn`/`sbt`/`pip`/`twine`
+clients resolve straight to the local mirror instead of the public registry.
+All formats are anonymous read/write except PyPI, where `pip install` is
+anonymous but `twine upload` needs a dedicated `pypi-uploader` account.
 
 ## Layout
 
